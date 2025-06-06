@@ -1,47 +1,55 @@
 ﻿import socket
 import threading
-import time
+
+HOST = 'localhost'
+PORT = 12345
 
 clients = []
-running = True
+server_socket = None
 
-def handle_client(client_socket, address):
-    print(f"{address} bağlandı.")
+def handle_client(client_socket):
+    clients.append(client_socket)
     while True:
         try:
-            data = client_socket.recv(1024).decode()
+            data = client_socket.recv(1024).decode('utf-8')
             if not data:
                 break
-            print(f"{address} >> {data}")
-            for c in clients:
-                if c != client_socket:
-                    c.sendall(f"{address} >> {data}".encode())
+            broadcast(data, sender=client_socket)
         except:
             break
-    print(f"{address} ayrıldı.")
     clients.remove(client_socket)
     client_socket.close()
 
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind(("localhost", 12345))
-server_socket.listen(5)
-server_socket.settimeout(1.0)  # 1 saniye içinde accept() yanıt vermezse timeout olacak
-
-print("Sunucu başlatıldı. CTRL + C ile durdurabilirsiniz.")
-
-try:
-    while running:
-        try:
-            client_socket, addr = server_socket.accept()
-            clients.append(client_socket)
-            thread = threading.Thread(target=handle_client, args=(client_socket, addr))
-            thread.start()
-        except socket.timeout:
-            continue  # timeout olduysa loop'u tekrar et, kapanma kontrolü yap
-except KeyboardInterrupt:
-    print("\nSunucu kapatılıyor...")
-    running = False
+def broadcast(message, sender=None):
     for client in clients:
-        client.close()
-    server_socket.close()
-    print("Sunucu başarıyla kapatıldı.")
+        if client != sender:
+            try:
+                client.sendall(message.encode('utf-8'))
+            except:
+                pass
+
+def start_server():
+    global server_socket
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen()
+    print(f"[SERVER] Listening on {HOST}:{PORT}")
+    
+    try:
+        while True:
+            client_socket, addr = server_socket.accept()
+            print(f"[NEW CONNECTION] {addr}")
+            threading.Thread(target=handle_client, args=(client_socket,), daemon=True).start()
+    except KeyboardInterrupt:
+        print("\n[SERVER] Shutting down...")
+    finally:
+        server_socket.close()
+        for c in clients:
+            try:
+                c.close()
+            except:
+                pass
+        print("[SERVER] Closed all connections and exited cleanly.")
+
+if __name__ == "__main__":
+    start_server()
