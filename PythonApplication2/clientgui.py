@@ -1,63 +1,94 @@
-import socket
+﻿import socket
 import threading
+import json
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 HOST = 'localhost'
 PORT = 12345
 
-class RealtimeEditorClient:
+class ClientApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Realtime Editor")
-        self.root.geometry("600x400")
-
+        self.root.title("Realtime Collaborative Editor")
+        self.root.geometry("700x500")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
+        # Kullanıcı adı sor
+        self.username = simpledialog.askstring("Kullanıcı Adı", "Lütfen kullanıcı adınızı girin:", parent=self.root)
+        if not self.username:
+            messagebox.showerror("Hata", "Kullanıcı adı gereklidir.")
+            root.destroy()
+            return
+
+        self.color = None
+        self.lock = threading.Lock()
+
+        # Frame
         self.frame = ctk.CTkFrame(self.root)
         self.frame.pack(expand=True, fill="both", padx=10, pady=10)
 
+        # Kullanıcı listesi label
+        self.user_list_label = ctk.CTkLabel(self.frame, text="Bağlı Kullanıcılar:")
+        self.user_list_label.pack(anchor="nw")
+
+        self.user_listbox = ctk.CTkTextbox(self.frame, height=50, state="disabled")
+        self.user_listbox.pack(fill="x", padx=5, pady=(0,10))
+
+        # Metin kutusu
         self.textbox = ctk.CTkTextbox(self.frame)
         self.textbox.pack(expand=True, fill="both")
-        self.textbox.bind("<KeyPress>", self.on_key_press)
+        self.textbox.bind("<<Paste>>", self.on_paste)
         self.textbox.bind("<KeyRelease>", self.on_key_release)
 
-        self.last_content = ""
-        self.lock = threading.Lock()
-
+        # Socket ayarları
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.client_socket.connect((HOST, PORT))
         except Exception as e:
-            messagebox.showerror("Connection Failed", str(e))
-            self.root.destroy()
+            messagebox.showerror("Bağlantı Hatası", str(e))
+            root.destroy()
             return
 
+        # Sunucuya join mesajı gönder
+        join_msg = json.dumps({"type": "join", "user": self.username})
+        self.client_socket.sendall((join_msg + "\n").encode("utf-8"))
+
         self.running = True
+        self.last_text = ""
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
-    def on_key_press(self, event):
-        self.last_content = self.textbox.get("1.0", "end-1c")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def on_paste(self, event):
+        # Clipboard içeriği metin kutusuna zaten geliyor, ek işlem gerekmez
+        pass
 
     def on_key_release(self, event):
-        new_content = self.textbox.get("1.0", "end-1c")
         with self.lock:
-            if len(new_content) > len(self.last_content):
-                added = new_content[len(self.last_content):]
-                index = self.textbox.index("insert -1c")
-                msg = f"insert|{index}|{added}"
-                self.send_message(msg)
-            elif len(new_content) < len(self.last_content):
-                index = self.textbox.index("insert")
-                msg = f"delete|{index}"
-                self.send_message(msg)
+            current_text = self.textbox.get("1.0", "end-1c")
+            # Fark var mı kontrolü
+            if current_text == self.last_text:
+                return
+            # Basit fark yakalama (ekleme ve silme)
+            # Daha gelişmiş metin farkı için özel algoritma lazım
+            # Burada sadece sondan farkı yakalıyoruz
 
-    def send_message(self, msg):
-        try:
-            self.client_socket.sendall((msg + "\n").encode("utf-8"))
-        except Exception as e:
-            print(f"[ERROR] Sending message failed: {e}")
+            # Silme
+            if len(current_text) < len(self.last_text):
+                index = self.textbox.index("insert")
+                msg = json.dumps({"type": "delete", "index": index, "user": self.username})
+                self.client_socket.sendall((msg + "\n").encode("utf-8"))
+
+            # Ekleme
+            elif len(current_text) > len(self.last_text):
+                inserted_text = current_text[len(self.last_text):]
+                index = self.textbox.index(f"insert - {len(inserted_text)}c")
+                msg = json.dumps({"type": "insert", "index": index, "content": inserted_text, "user": self.username})
+                self.client_socket.sendall((msg + "\n").encode("utf-8"))
+
+            self.last_text = current_text
 
     def receive_loop(self):
         buffer = ""
@@ -68,22 +99,44 @@ class RealtimeEditorClient:
                     break
                 buffer += data
                 while "\n" in buffer:
-                    full_msg, buffer = buffer.split("\n", 1)
-                    self.apply_change(full_msg)
+                    msg_str, buffer = buffer.split("\n", 1)
+                    self.handle_message(msg_str)
             except:
                 break
 
-    def apply_change(self, msg):
+    def handle_message(self, msg_str):
         try:
-            parts = msg.split("|")
-            if parts[0] == "insert":
-                index, content = parts[1], parts[2]
-                self.textbox.insert(index, content)
-            elif parts[0] == "delete":
-                index = parts[1]
-                self.textbox.delete(index)
+            msg = json.loads(msg_str)
+            t = msg.get("type")
+            if t == "full_text":
+                with self.lock:
+                    self.textbox.delete("1.0", "end")
+                    self.textbox.insert("1.0", msg["content"])
+                    self.last_text = msg["content"]
+
+            elif t == "insert":
+                with self.lock:
+                    idx = msg["index"]
+                    content = msg["content"]
+                    self.textbox.insert(idx, content)
+                    self.last_text = self.textbox.get("1.0", "end-1c")
+
+            elif t == "delete":
+                with self.lock:
+                    idx = msg["index"]
+                    self.textbox.delete(idx)
+                    self.last_text = self.textbox.get("1.0", "end-1c")
+
+            elif t == "user_list":
+                users = msg["content"]
+                self.user_listbox.configure(state="normal")
+                self.user_listbox.delete("1.0", "end")
+                for u in users:
+                    self.user_listbox.insert("end", f"{u}\n")
+                self.user_listbox.configure(state="disabled")
+
         except Exception as e:
-            print(f"[ERROR] Apply change failed: {e}")
+            print(f"[CLIENT] Error in handle_message: {e}")
 
     def on_close(self):
         self.running = False
@@ -95,6 +148,5 @@ class RealtimeEditorClient:
 
 if __name__ == "__main__":
     root = ctk.CTk()
-    app = RealtimeEditorClient(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    app = ClientApp(root)
     root.mainloop()
