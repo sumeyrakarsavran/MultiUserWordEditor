@@ -1,225 +1,249 @@
 ﻿import socket
 import threading
 import json
-import customtkinter as ctk
-from tkinter import messagebox, simpledialog
+import tkinter as tk
+from tkinter import simpledialog, messagebox
 
-HOST = 'localhost'
-PORT = 12345
+HOST = '127.0.0.1'
+PORT = 65432
 
 class ClientApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Realtime Collaborative Editor")
-        self.root.geometry("800x600")
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        self.root.title("Real-time Collaborative Editor")
 
-        self.username = simpledialog.askstring("Kullanıcı Adı", "Lütfen kullanıcı adınızı girin:", parent=self.root)
-        if not self.username:
-            messagebox.showerror("Hata", "Kullanıcı adı gereklidir.")
-            root.destroy()
-            return
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((HOST, PORT))
 
-        self.lock = threading.Lock()
+        self.username = None
         self.current_file = None
         self.files = []
 
-        self.frame = ctk.CTkFrame(self.root)
-        self.frame.pack(expand=True, fill="both", padx=10, pady=10)
+        self.text_modified_by_me = False  # flag to prevent feedback loop
 
-        # Sol tarafta dosya listesi ve yeni dosya oluşturma
-        left_frame = ctk.CTkFrame(self.frame, width=200)
-        left_frame.pack(side="left", fill="y", padx=(0,10), pady=5)
+        # UI components
+        self.frame = tk.Frame(root)
+        self.frame.pack(fill=tk.BOTH, expand=True)
 
-        ctk.CTkLabel(left_frame, text="Dosyalar").pack(pady=5)
+        self.listbox_files = tk.Listbox(self.frame, width=30)
+        self.listbox_files.pack(side=tk.LEFT, fill=tk.Y)
+        self.listbox_files.bind("<<ListboxSelect>>", self.on_file_select)
 
-        self.file_listbox = ctk.CTkTextbox(left_frame, height=300, state="disabled")
-        self.file_listbox.pack(expand=True, fill="both", padx=5)
+        btn_frame = tk.Frame(self.frame)
+        btn_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5)
 
-        self.file_listbox.bind("<1>", self.on_file_click)  # Mouse click handler
+        self.btn_create = tk.Button(btn_frame, text="Create File", command=self.create_file)
+        self.btn_create.pack(pady=5)
 
-        # Yeni dosya oluşturma alanı
-        ctk.CTkLabel(left_frame, text="Yeni Dosya Adı:").pack(pady=(10,0))
-        self.new_file_entry = ctk.CTkEntry(left_frame)
-        self.new_file_entry.pack(fill="x", padx=5, pady=5)
-        self.create_file_btn = ctk.CTkButton(left_frame, text="Dosya Oluştur", command=self.create_file)
-        self.create_file_btn.pack(padx=5)
+        self.btn_refresh = tk.Button(btn_frame, text="Refresh Files", command=self.request_files)
+        self.btn_refresh.pack(pady=5)
 
-        # Sağ tarafta metin kutusu ve kullanıcı listesi
-        right_frame = ctk.CTkFrame(self.frame)
-        right_frame.pack(side="right", expand=True, fill="both")
+        self.text = tk.Text(self.frame, undo=True, wrap=tk.NONE)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.textbox = ctk.CTkTextbox(right_frame)
-        self.textbox.pack(expand=True, fill="both", padx=5, pady=(0,5))
-        self.textbox.bind("<KeyRelease>", self.on_key_release)
+        self.text.bind("<<Modified>>", self.on_text_modified)
 
-        ctk.CTkLabel(right_frame, text="Bağlı Kullanıcılar:").pack(anchor="nw")
-        self.user_listbox = ctk.CTkTextbox(right_frame, height=60, state="disabled")
-        self.user_listbox.pack(fill="x", padx=5, pady=(0,10))
+        self.start_recv_thread()
+        self.ask_username()
 
-        # Socket bağlantısı
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.client_socket.connect((HOST, PORT))
-        except Exception as e:
-            messagebox.showerror("Bağlantı Hatası", str(e))
-            root.destroy()
+    def ask_username(self):
+        username = simpledialog.askstring("Username", "Enter your username:", parent=self.root)
+        if not username:
+            messagebox.showerror("Error", "Username required.")
+            self.root.destroy()
             return
+        self.username = username
+        self.send({
+            "action": "set_username",
+            "username": self.username
+        })
 
-        # Sunucuya join mesajı gönder
-        join_msg = json.dumps({"type": "join", "user": self.username})
-        self.client_socket.sendall((join_msg + "\n").encode("utf-8"))
+    def send(self, data):
+        try:
+            msg = json.dumps(data) + "\n"
+            self.sock.sendall(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Send error: {e}")
 
-        self.running = True
-        self.last_text = ""
-        threading.Thread(target=self.receive_loop, daemon=True).start()
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def update_file_listbox(self):
-        self.file_listbox.configure(state="normal")
-        self.file_listbox.delete("1.0", "end")
-        for f in self.files:
-            self.file_listbox.insert("end", f + "\n")
-        self.file_listbox.configure(state="disabled")
-
-    def on_file_click(self, event):
-        # Tıklanan satırı bul
-        index = self.file_listbox.index("@%d,%d linestart" % (event.x, event.y))
-        line_num = int(index.split('.')[0])
-        if line_num-1 < len(self.files):
-            filename = self.files[line_num-1]
-            self.open_file(filename)
+    def request_files(self):
+        # Server sends files list on set_username, but we can force refresh if needed
+        self.send({"action": "list_files"})
 
     def create_file(self):
-        filename = self.new_file_entry.get().strip()
-        if not filename:
-            messagebox.showwarning("Uyarı", "Dosya adı boş olamaz.")
+        fname = simpledialog.askstring("Create File", "Enter new file name:", parent=self.root)
+        if not fname:
             return
-        if filename in self.files:
-            messagebox.showwarning("Uyarı", "Bu isimde dosya zaten var.")
-            return
-        msg = json.dumps({"type": "create_file", "filename": filename})
-        self.client_socket.sendall((msg + "\n").encode("utf-8"))
-        self.new_file_entry.delete(0, "end")
+        self.send({"action": "create_file", "filename": fname})
 
-    def open_file(self, filename):
-        if filename == self.current_file:
+    def on_file_select(self, event):
+        selection = self.listbox_files.curselection()
+        if not selection:
             return
+        index = selection[0]
+        filename = self.listbox_files.get(index)
         self.current_file = filename
-        msg = json.dumps({"type": "open_file", "filename": filename})
-        self.client_socket.sendall((msg + "\n").encode("utf-8"))
-        self.root.title(f"Realtime Collaborative Editor - {filename}")
+        self.send({"action": "open_file", "filename": filename})
 
-    def on_key_release(self, event):
-        with self.lock:
-            if not self.current_file:
-                return
-            current_text = self.textbox.get("1.0", "end-1c")
-            if current_text == self.last_text:
-                return
+    def on_text_modified(self, event):
+        if self.text_modified_by_me:
+            # This change is from incoming server data, ignore to prevent loop
+            self.text.edit_modified(False)
+            return
 
-            # Basit fark algılama: ekleme veya silme
-            if len(current_text) < len(self.last_text):
-                index = self.textbox.index("insert")
-                msg = json.dumps({
-                    "type": "delete",
-                    "index": index,
-                    "filename": self.current_file,
-                    "user": self.username
-                })
-                self.client_socket.sendall((msg + "\n").encode("utf-8"))
+        if not self.current_file:
+            self.text.edit_modified(False)
+            return
 
-            elif len(current_text) > len(self.last_text):
-                inserted_text = current_text[len(self.last_text):]
-                index = self.textbox.index(f"insert - {len(inserted_text)}c")
-                msg = json.dumps({
-                    "type": "insert",
-                    "index": index,
-                    "content": inserted_text,
-                    "filename": self.current_file,
-                    "user": self.username
-                })
-                self.client_socket.sendall((msg + "\n").encode("utf-8"))
+        # Get current cursor position
+        try:
+            index = self.text.index(tk.INSERT)
+        except Exception:
+            index = "1.0"
 
-            self.last_text = current_text
+        # Get the content of the text widget
+        # To detect insert/delete, we need to compare previous content and current content,
+        # but for simplicity, we assume single character insert or delete here.
 
-    def receive_loop(self):
+        # This is a simple heuristic:
+        # On modification event, get the change by comparing previous snapshot and current text
+        # But since Tkinter doesn't give direct diffs, we'll just send the whole content for now.
+        # (For full operational transformation, a diffing lib or more complex logic is needed.)
+
+        # Instead, here we detect whether the last key was an insert or delete:
+        # Unfortunately Tkinter event doesn't give that directly.
+        # So as a quick demo, let's send the whole content as "replace" operation.
+        # But this breaks your insert/delete messaging protocol.
+        # To keep your protocol, let's track last text snapshot and find difference.
+
+        # So implement simple diff with last content:
+        new_text = self.text.get("1.0", tk.END)[:-1]  # remove trailing newline
+        old_text = getattr(self, 'last_text', '')
+        self.last_text = new_text
+
+        # Find first difference
+        i = 0
+        while i < len(new_text) and i < len(old_text) and new_text[i] == old_text[i]:
+            i += 1
+
+        if len(new_text) > len(old_text):
+            # Insert happened
+            inserted_text = new_text[i:len(new_text)-(len(old_text)-i)]
+            # Compose index in "line.char" form
+            line, char = map(int, self.text.index(f"1.0 + {i} chars").split('.'))
+            index_str = f"{line}.{char}"
+            self.send({
+                "action": "insert",
+                "filename": self.current_file,
+                "index": index_str,
+                "content": inserted_text
+            })
+
+        elif len(new_text) < len(old_text):
+            # Delete happened
+            # We assume one character deleted for simplicity
+            line, char = map(int, self.text.index(f"1.0 + {i+1} chars").split('.'))
+            index_str = f"{line}.{char}"
+            self.send({
+                "action": "delete",
+                "filename": self.current_file,
+                "index": index_str
+            })
+
+        self.text.edit_modified(False)
+
+    def start_recv_thread(self):
+        threading.Thread(target=self.recv_loop, daemon=True).start()
+
+    def recv_loop(self):
         buffer = ""
-        while self.running:
+        while True:
             try:
-                data = self.client_socket.recv(1024).decode("utf-8")
+                data = self.sock.recv(4096)
                 if not data:
                     break
-                buffer += data
+                buffer += data.decode('utf-8')
                 while "\n" in buffer:
                     msg_str, buffer = buffer.split("\n", 1)
                     self.handle_message(msg_str)
-            except:
+            except Exception as e:
+                print(f"Receive error: {e}")
                 break
+        print("Disconnected from server")
+        self.sock.close()
 
     def handle_message(self, msg_str):
         try:
             msg = json.loads(msg_str)
-            t = msg.get("type")
+        except:
+            return
 
-            if t == "files_list":
-                self.files = msg.get("files", [])
-                self.update_file_listbox()
+        action = msg.get("action")
 
-            elif t == "file_created":
-                filename = msg.get("filename")
-                if filename and filename not in self.files:
-                    self.files.append(filename)
-                    self.update_file_listbox()
+        if action == "files_list":
+            self.files = msg.get("files", [])
+            self.update_file_list()
 
-            elif t == "file_content":
-                filename = msg.get("filename")
-                content = msg.get("content", "")
-                if filename == self.current_file:
-                    with self.lock:
-                        self.textbox.delete("1.0", "end")
-                        self.textbox.insert("1.0", content)
-                        self.last_text = content
+        elif action == "file_created":
+            fname = msg.get("filename")
+            if fname and fname not in self.files:
+                self.files.append(fname)
+                self.update_file_list()
 
-            elif t == "insert":
-                filename = msg.get("filename")
-                if filename == self.current_file:
-                    with self.lock:
-                        idx = msg["index"]
-                        content = msg["content"]
-                        self.textbox.insert(idx, content)
-                        self.last_text = self.textbox.get("1.0", "end-1c")
+        elif action == "file_content":
+            fname = msg.get("filename")
+            content = msg.get("content", "")
+            if fname == self.current_file:
+                self.apply_full_content(content)
 
-            elif t == "delete":
-                filename = msg.get("filename")
-                if filename == self.current_file:
-                    with self.lock:
-                        idx = msg["index"]
-                        self.textbox.delete(idx)
-                        self.last_text = self.textbox.get("1.0", "end-1c")
+        elif action == "insert":
+            fname = msg.get("filename")
+            index = msg.get("index")
+            content = msg.get("content")
+            if fname == self.current_file and content:
+                self.apply_insert(index, content)
 
-            elif t == "user_list":
-                users = msg.get("content", [])
-                self.user_listbox.configure(state="normal")
-                self.user_listbox.delete("1.0", "end")
-                for u in users:
-                    self.user_listbox.insert("end", u + "\n")
-                self.user_listbox.configure(state="disabled")
+        elif action == "delete":
+            fname = msg.get("filename")
+            index = msg.get("index")
+            if fname == self.current_file:
+                self.apply_delete(index)
 
-        except Exception as e:
-            print(f"[CLIENT] Hata handle_message: {e}")
+    def update_file_list(self):
+        self.listbox_files.delete(0, tk.END)
+        for f in self.files:
+            self.listbox_files.insert(tk.END, f)
 
-    def on_close(self):
-        self.running = False
+    def apply_full_content(self, content):
+        self.text_modified_by_me = True
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", content)
+        self.text_modified_by_me = False
+        self.last_text = content
+
+    def apply_insert(self, index, content):
+        self.text_modified_by_me = True
         try:
-            self.client_socket.close()
+            self.text.insert(index, content)
+            self.last_text = self.text.get("1.0", tk.END)[:-1]
         except:
             pass
-        self.root.destroy()
+        self.text_modified_by_me = False
+
+    def apply_delete(self, index):
+        self.text_modified_by_me = True
+        try:
+            # delete character before index (since server delete is index of char to delete)
+            line, char = map(int, index.split('.'))
+            if char > 0:
+                start = f"{line}.{char - 1}"
+                end = index
+                self.text.delete(start, end)
+                self.last_text = self.text.get("1.0", tk.END)[:-1]
+        except:
+            pass
+        self.text_modified_by_me = False
 
 if __name__ == "__main__":
-    root = ctk.CTk()
+    root = tk.Tk()
     app = ClientApp(root)
     root.mainloop()
