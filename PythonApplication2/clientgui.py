@@ -1,152 +1,104 @@
-﻿import socket
+﻿# client_gui_customtkinter.py
+import socket
 import threading
-import json
 import customtkinter as ctk
-from tkinter import messagebox, simpledialog
+from tkinter import filedialog
 
-HOST = 'localhost'
+HOST = '127.0.0.1'
 PORT = 12345
+BUFFER_SIZE = 1024
 
-class ClientApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Realtime Collaborative Editor")
-        self.root.geometry("700x500")
-        ctk.set_appearance_mode("dark")
+class EditorApp:
+    def __init__(self):
+        self.sock = None
+        self.username = ""
+        self.filename = ""
+
+        ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
 
-        # Kullanıcı adı sor
-        self.username = simpledialog.askstring("Kullanıcı Adı", "Lütfen kullanıcı adınızı girin:", parent=self.root)
-        if not self.username:
-            messagebox.showerror("Hata", "Kullanıcı adı gereklidir.")
-            root.destroy()
-            return
+        self.root = ctk.CTk()
+        self.root.title("Multiuser Editor")
+        self.root.geometry("800x600")
 
-        self.color = None
-        self.lock = threading.Lock()
-
-        # Frame
         self.frame = ctk.CTkFrame(self.root)
-        self.frame.pack(expand=True, fill="both", padx=10, pady=10)
+        self.frame.pack(padx=10, pady=10, fill="both", expand=True)
 
-        # Kullanıcı listesi label
-        self.user_list_label = ctk.CTkLabel(self.frame, text="Bağlı Kullanıcılar:")
-        self.user_list_label.pack(anchor="nw")
+        self.username_entry = ctk.CTkEntry(self.frame, placeholder_text="Username")
+        self.username_entry.pack(pady=5)
 
-        self.user_listbox = ctk.CTkTextbox(self.frame, height=50, state="disabled")
-        self.user_listbox.pack(fill="x", padx=5, pady=(0,10))
+        self.connect_button = ctk.CTkButton(self.frame, text="Connect", command=self.connect_to_server)
+        self.connect_button.pack(pady=5)
 
-        # Metin kutusu
-        self.textbox = ctk.CTkTextbox(self.frame)
-        self.textbox.pack(expand=True, fill="both")
-        self.textbox.bind("<<Paste>>", self.on_paste)
-        self.textbox.bind("<KeyRelease>", self.on_key_release)
+        self.file_entry = ctk.CTkEntry(self.frame, placeholder_text="Dosya adi (ext yazma)")
+        self.file_entry.pack(pady=5)
 
-        # Socket ayarları
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.open_button = ctk.CTkButton(self.frame, text="Dosya Ac", command=self.open_file)
+        self.open_button.pack(pady=5)
+
+        self.textbox = ctk.CTkTextbox(self.frame, wrap="word")
+        self.textbox.pack(padx=10, pady=10, fill="both", expand=True)
+        self.textbox.bind("<KeyRelease>", self.on_text_change)
+
+        self.status_label = ctk.CTkLabel(self.frame, text="Durum: Bagli degil")
+        self.status_label.pack(pady=5)
+
+        self.last_content = ""
+
+    def connect_to_server(self):
         try:
-            self.client_socket.connect((HOST, PORT))
+            self.username = self.username_entry.get().strip()
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((HOST, PORT))
+            self.sock.sendall(self.username.encode('utf-8'))
+            self.status_label.configure(text="Durum: Baglandi")
+            threading.Thread(target=self.receive_data, daemon=True).start()
         except Exception as e:
-            messagebox.showerror("Bağlantı Hatası", str(e))
-            root.destroy()
-            return
+            self.status_label.configure(text=f"Hata: {e}")
 
-        # Sunucuya join mesajı gönder
-        join_msg = json.dumps({"type": "join", "user": self.username})
-        self.client_socket.sendall((join_msg + "\n").encode("utf-8"))
+    def open_file(self):
+        try:
+            self.filename = self.file_entry.get().strip()
+            if self.filename:
+                self.sock.sendall(f"OPEN||{self.filename}".encode('utf-8'))
+        except:
+            pass
 
-        self.running = True
-        self.last_text = ""
-        threading.Thread(target=self.receive_loop, daemon=True).start()
+    def on_text_change(self, event=None):
+        content = self.textbox.get("1.0", "end-1c")
+        if content != self.last_content:
+            self.last_content = content
+            if self.filename:
+                try:
+                    self.sock.sendall(f"EDIT||{self.filename}||{content}".encode('utf-8'))
+                except:
+                    pass
 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def on_paste(self, event):
-        # Clipboard içeriği metin kutusuna zaten geliyor, ek işlem gerekmez
-        pass
-
-    def on_key_release(self, event):
-        with self.lock:
-            current_text = self.textbox.get("1.0", "end-1c")
-            # Fark var mı kontrolü
-            if current_text == self.last_text:
-                return
-            # Basit fark yakalama (ekleme ve silme)
-            # Daha gelişmiş metin farkı için özel algoritma lazım
-            # Burada sadece sondan farkı yakalıyoruz
-
-            # Silme
-            if len(current_text) < len(self.last_text):
-                index = self.textbox.index("insert")
-                msg = json.dumps({"type": "delete", "index": index, "user": self.username})
-                self.client_socket.sendall((msg + "\n").encode("utf-8"))
-
-            # Ekleme
-            elif len(current_text) > len(self.last_text):
-                inserted_text = current_text[len(self.last_text):]
-                index = self.textbox.index(f"insert - {len(inserted_text)}c")
-                msg = json.dumps({"type": "insert", "index": index, "content": inserted_text, "user": self.username})
-                self.client_socket.sendall((msg + "\n").encode("utf-8"))
-
-            self.last_text = current_text
-
-    def receive_loop(self):
-        buffer = ""
-        while self.running:
+    def receive_data(self):
+        while True:
             try:
-                data = self.client_socket.recv(1024).decode("utf-8")
+                data = self.sock.recv(BUFFER_SIZE).decode('utf-8')
                 if not data:
                     break
-                buffer += data
-                while "\n" in buffer:
-                    msg_str, buffer = buffer.split("\n", 1)
-                    self.handle_message(msg_str)
+                parts = data.split("||", 2)
+                command = parts[0]
+                if command == "LOAD":
+                    _, fname, content = parts
+                    self.root.after(0, lambda: self.textbox.delete("1.0", "end"))
+                    self.root.after(0, lambda: self.textbox.insert("1.0", content))
+                    self.last_content = content
+                elif command == "UPDATE":
+                    _, fname, content = parts
+                    if fname == self.filename:
+                        self.root.after(0, lambda: self.textbox.delete("1.0", "end"))
+                        self.root.after(0, lambda: self.textbox.insert("1.0", content))
+                        self.last_content = content
             except:
                 break
 
-    def handle_message(self, msg_str):
-        try:
-            msg = json.loads(msg_str)
-            t = msg.get("type")
-            if t == "full_text":
-                with self.lock:
-                    self.textbox.delete("1.0", "end")
-                    self.textbox.insert("1.0", msg["content"])
-                    self.last_text = msg["content"]
-
-            elif t == "insert":
-                with self.lock:
-                    idx = msg["index"]
-                    content = msg["content"]
-                    self.textbox.insert(idx, content)
-                    self.last_text = self.textbox.get("1.0", "end-1c")
-
-            elif t == "delete":
-                with self.lock:
-                    idx = msg["index"]
-                    self.textbox.delete(idx)
-                    self.last_text = self.textbox.get("1.0", "end-1c")
-
-            elif t == "user_list":
-                users = msg["content"]
-                self.user_listbox.configure(state="normal")
-                self.user_listbox.delete("1.0", "end")
-                for u in users:
-                    self.user_listbox.insert("end", f"{u}\n")
-                self.user_listbox.configure(state="disabled")
-
-        except Exception as e:
-            print(f"[CLIENT] Error in handle_message: {e}")
-
-    def on_close(self):
-        self.running = False
-        try:
-            self.client_socket.close()
-        except:
-            pass
-        self.root.destroy()
+    def run(self):
+        self.root.mainloop()
 
 if __name__ == "__main__":
-    root = ctk.CTk()
-    app = ClientApp(root)
-    root.mainloop()
+    app = EditorApp()
+    app.run()
