@@ -1,6 +1,6 @@
 Multi-User Real-Time Text Editor
 
-**10\. SCREENSHOTS & PRINTOUTS**
+**SCREENSHOTS & PRINTOUTS**
 
 **Usage**
 
